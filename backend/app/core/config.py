@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     max_video_size_bytes: int = 50 * 1024 * 1024
     max_video_duration_seconds: int = 300
     ai_image_size: int = 640
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_sender: str | None = None
+    smtp_use_tls: bool = True
+    smtp_recipient_roles: str = "admin,authorized_user"
+    max_import_size_bytes: int = 10 * 1024 * 1024
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

@@ -8,4 +8,5 @@ main { max-width: 1000px; margin: 0 auto; padding: 3rem 1.5rem; } h1 { margin-to
 .row { display: flex; justify-content: space-between; align-items: start; } .list { display: grid; gap: .75rem; } .list .card { margin: 0; color: inherit; text-decoration: none; }
 form { display: grid; gap: 1rem; } label { display: grid; gap: .35rem; font-weight: 600; } input, textarea, select { width: 100%; padding: .7rem; border: 1px solid #cbd2e1; border-radius: 5px; font: inherit; } textarea { min-height: 100px; }
 .primary { background: #536dfe; color: white; } .search { display: flex; grid-template-columns: 1fr auto; margin-bottom: 1rem; } .search input { flex: 1; } .error { color: #b42318; } .success { color: #067647; }
+.map { height: 360px; width: 100%; }
 @media (max-width: 600px) { header { padding: 1rem; } nav { gap: .5rem; } main { padding: 2rem 1rem; } }

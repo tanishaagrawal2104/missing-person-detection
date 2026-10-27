@@ -77,3 +77,26 @@ tasks. Search results are possible matches only and require authorized human
 review. Video processing requires OpenCV-compatible codecs and does not
 provide a durable external worker queue; a process restart stops in-flight
 background jobs.
+
+## Maps, notifications, and synthetic imports
+
+Run `npm install` in `frontend/` to install Leaflet and React Leaflet. The
+dashboard uses OpenStreetMap tiles and only plots records with saved latitude
+and longitude values. Apply all migrations with:
+
+```powershell
+cd backend
+alembic upgrade head
+```
+
+SMTP notifications are optional. Set `SMTP_HOST`, `SMTP_PORT`,
+`SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_SENDER`, and `SMTP_USE_TLS` in
+`backend/.env`; failures are logged and do not roll back saved sightings.
+
+Administrators can import synthetic sample CSV data from the dashboard. The
+CSV must contain `case_key`, `name`, and `status`; optional columns include
+`description`, `last_seen_at`, `last_seen_location`, `last_seen_latitude`,
+`last_seen_longitude`, `sighting_key`, `observed_at`, `sighting_location`,
+`sighting_latitude`, and `sighting_longitude`. Imports are transactional,
+duplicate keys are rejected, and no images, embeddings, or AI matches are
+created.

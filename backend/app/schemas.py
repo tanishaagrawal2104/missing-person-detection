@@ -34,10 +34,29 @@ class CaseCreate(BaseModel):
     date_of_birth: date | None = None
     last_seen_location: str | None = Field(default=None, max_length=255)
     last_seen_at: datetime | None = None
+    last_seen_latitude: float | None = Field(default=None, ge=-90, le=90)
+    last_seen_longitude: float | None = Field(default=None, ge=-180, le=180)
 
 
 class CaseUpdate(CaseCreate):
     status: str = Field(default="open", pattern="^(open|under_review|resolved|closed)$")
+
+
+class MapRecord(BaseModel):
+    id: UUID
+    record_type: str
+    latitude: float
+    longitude: float
+    label: str
+    status: str
+    observed_at: datetime | None = None
+
+
+class ImportSummary(BaseModel):
+    imported_cases: int
+    imported_sightings: int
+    rejected_rows: int
+    errors: list[str]
 
 
 class ReferenceImageResponse(BaseModel):

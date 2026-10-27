@@ -39,9 +39,12 @@ class MissingPersonCase(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="open", nullable=False)
+    external_id: Mapped[str | None] = mapped_column(String(128), unique=True)
     date_of_birth: Mapped[date | None] = mapped_column(Date)
     last_seen_location: Mapped[str | None] = mapped_column(String(255))
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_latitude: Mapped[float | None] = mapped_column(Float)
+    last_seen_longitude: Mapped[float | None] = mapped_column(Float)
 
     created_by: Mapped[User] = relationship(back_populates="cases")
     reference_images: Mapped[list["ReferenceImage"]] = relationship(
@@ -73,11 +76,14 @@ class Sighting(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("missing_person_cases.id"), nullable=False)
     source: Mapped[str] = mapped_column(String(32), default="portal", nullable=False)
+    external_id: Mapped[str | None] = mapped_column(String(128), unique=True)
     storage_key: Mapped[str | None] = mapped_column(String(512))
     status: Mapped[str] = mapped_column(String(32), default="pending_review", nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
     observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     location: Mapped[str | None] = mapped_column(String(255))
+    latitude: Mapped[float | None] = mapped_column(Float)
+    longitude: Mapped[float | None] = mapped_column(Float)
 
     case: Mapped[MissingPersonCase] = relationship(back_populates="sightings")
 

@@ -1,6 +1,8 @@
 import time
 import uuid
 import logging
+import csv
+from io import StringIO
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +20,7 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
+from app.services.notifications import notify_case_users
 from app.db.session import get_db
 from app.db.session import SessionLocal
 from app.models import AuditRecord, MissingPersonCase, ReferenceImage, Sighting, User
@@ -36,6 +39,8 @@ from app.schemas import (
     DashboardResponse,
     CandidateReview,
     CandidateResponse,
+    ImportSummary,
+    MapRecord,
     SearchJobResponse,
     LoginRequest,
     PublicSightingResponse,
@@ -113,6 +118,12 @@ async def store_video(upload: UploadFile) -> str:
 
 def permitted_case(case: MissingPersonCase | None, user: User) -> bool:
     return case is not None and (user.role == "admin" or case.created_by_id == user.id)
+
+
+def coordinate(value: float | None, minimum: float, maximum: float, name: str) -> float | None:
+    if value is not None and not minimum <= value <= maximum:
+        raise HTTPException(status_code=422, detail=f"{name} is outside its valid range")
+    return value
 
 
 def process_image_job(job_id: uuid.UUID, content: bytes, query_storage_key: str) -> None:
@@ -261,6 +272,111 @@ def dashboard(user: User = Depends(current_user), db: Session = Depends(get_db))
     )
 
 
+@router.get("/dashboard/map", response_model=list[MapRecord])
+def dashboard_map(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[MapRecord]:
+    case_query = select(MissingPersonCase)
+    if user.role != "admin":
+        case_query = case_query.where(MissingPersonCase.created_by_id == user.id)
+    records: list[MapRecord] = []
+    cases = db.scalars(case_query).all()
+    allowed_case_ids = {case.id for case in cases}
+    for case in cases:
+        if case.last_seen_latitude is not None and case.last_seen_longitude is not None:
+            records.append(MapRecord(
+                id=case.id, record_type="case", latitude=case.last_seen_latitude,
+                longitude=case.last_seen_longitude, label=case.name, status=case.status,
+            ))
+    sightings = db.scalars(select(Sighting).where(Sighting.case_id.in_(allowed_case_ids))).all() if allowed_case_ids else []
+    for sighting in sightings:
+        if sighting.latitude is not None and sighting.longitude is not None:
+            records.append(MapRecord(
+                id=sighting.id, record_type="sighting", latitude=sighting.latitude,
+                longitude=sighting.longitude, label="Reported sighting", status=sighting.status,
+                observed_at=sighting.observed_at,
+            ))
+    return records
+
+
+@router.get("/admin/notification-status")
+def notification_status(user: User = Depends(require_admin)) -> dict[str, bool]:
+    return {"smtp_configured": bool(settings.smtp_host and settings.smtp_sender)}
+
+
+@router.post("/admin/demo-import", response_model=ImportSummary)
+async def import_demo_data(
+    file: UploadFile = File(...),
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> ImportSummary:
+    if file.content_type not in {"text/csv", "application/csv", "application/vnd.ms-excel"}:
+        raise HTTPException(status_code=415, detail="Upload a CSV file")
+    content = await file.read(settings.max_import_size_bytes + 1)
+    if len(content) > settings.max_import_size_bytes:
+        raise HTTPException(status_code=413, detail="CSV exceeds the size limit")
+    required = {"case_key", "name", "status"}
+    try:
+        reader = csv.DictReader(StringIO(content.decode("utf-8-sig")))
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=422, detail="CSV must be UTF-8 encoded") from exc
+    if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
+        raise HTTPException(status_code=422, detail=f"CSV requires columns: {', '.join(sorted(required))}")
+    errors: list[str] = []
+    imported_cases = imported_sightings = rejected = 0
+    try:
+        for row_number, row in enumerate(reader, 2):
+            try:
+                case_key, name, status_value = row["case_key"].strip(), row["name"].strip(), row["status"].strip()
+                if not case_key or not name or status_value not in {"open", "under_review", "resolved", "closed"}:
+                    raise ValueError("case_key, name, and a valid status are required")
+                if db.scalar(select(MissingPersonCase).where(MissingPersonCase.external_id == case_key)):
+                    raise ValueError("duplicate case_key")
+                case = MissingPersonCase(
+                    external_id=case_key, name=name, status=status_value,
+                    description=f"Synthetic demo record: {row.get('description', '').strip()}",
+                    created_by_id=user.id,
+                    last_seen_location=row.get("last_seen_location") or None,
+                    last_seen_latitude=float(row["last_seen_latitude"]) if row.get("last_seen_latitude") else None,
+                    last_seen_longitude=float(row["last_seen_longitude"]) if row.get("last_seen_longitude") else None,
+                )
+                if row.get("last_seen_at"):
+                    case.last_seen_at = datetime.fromisoformat(row["last_seen_at"])
+                coordinate(case.last_seen_latitude, -90, 90, "last_seen_latitude")
+                coordinate(case.last_seen_longitude, -180, 180, "last_seen_longitude")
+                db.add(case)
+                db.flush()
+                imported_cases += 1
+                if row.get("sighting_key"):
+                    sighting_key = row["sighting_key"].strip()
+                    if db.scalar(select(Sighting).where(Sighting.external_id == sighting_key)):
+                        raise ValueError("duplicate sighting_key")
+                    sighting = Sighting(
+                        external_id=sighting_key, case_id=case.id,
+                        source="synthetic_demo", status="pending_review",
+                        location=row.get("sighting_location") or None,
+                        latitude=float(row["sighting_latitude"]) if row.get("sighting_latitude") else None,
+                        longitude=float(row["sighting_longitude"]) if row.get("sighting_longitude") else None,
+                        notes="Synthetic demo record",
+                    )
+                    if row.get("observed_at"):
+                        sighting.observed_at = datetime.fromisoformat(row["observed_at"])
+                    coordinate(sighting.latitude, -90, 90, "sighting_latitude")
+                    coordinate(sighting.longitude, -180, 180, "sighting_longitude")
+                    db.add(sighting)
+                    imported_sightings += 1
+            except (KeyError, TypeError, ValueError) as exc:
+                rejected += 1
+                errors.append(f"row {row_number}: {exc}")
+        if errors:
+            db.rollback()
+            return ImportSummary(imported_cases=0, imported_sightings=0, rejected_rows=rejected, errors=errors)
+        audit(db, user, "demo_data.imported")
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=422, detail="Import failed; no rows were committed")
+    return ImportSummary(imported_cases=imported_cases, imported_sightings=imported_sightings, rejected_rows=0, errors=[])
+
+
 @router.get("/cases", response_model=list[CaseResponse])
 def list_cases(
     search: str | None = None, status_filter: str | None = None,
@@ -360,6 +476,7 @@ def delete_reference_image(image_id: uuid.UUID, user: User = Depends(current_use
 async def submit_sighting(
     request: Request, case_id: uuid.UUID = Form(...), observed_at: datetime = Form(...),
     location: str = Form(...), description: str | None = Form(None),
+    latitude: float | None = Form(None), longitude: float | None = Form(None),
     image: UploadFile = File(...), db: Session = Depends(get_db),
 ) -> PublicSightingResponse:
     now = time.time()
@@ -372,9 +489,12 @@ async def submit_sighting(
     if case is None or case.status in {"resolved", "closed"}:
         raise HTTPException(status_code=404, detail="Case is not accepting sightings")
     key = await store_image(image)
-    sighting = Sighting(case_id=case_id, source="public_portal", storage_key=key, observed_at=observed_at, location=location, notes=description)
+    coordinate(latitude, -90, 90, "latitude")
+    coordinate(longitude, -180, 180, "longitude")
+    sighting = Sighting(case_id=case_id, source="public_portal", storage_key=key, observed_at=observed_at, location=location, notes=description, latitude=latitude, longitude=longitude)
     db.add(sighting)
     db.commit()
+    notify_case_users(db, case, "New sighting submitted", "A new public sighting was submitted and is awaiting authorized review.")
     return PublicSightingResponse(id=sighting.id, status=sighting.status, message="Sighting submitted for review")
 
 

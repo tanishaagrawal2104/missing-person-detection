@@ -3,6 +3,8 @@ import ReactDOM from "react-dom/client";
 import {
   BrowserRouter, Link, Navigate, Route, Routes, useNavigate, useParams,
 } from "react-router-dom";
+import { CircleMarker, MapContainer, Popup, TileLayer } from "react-leaflet";
+import "leaflet/dist/leaflet.css";
 import "./styles.css";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -53,13 +55,23 @@ function AuthPage({ register = false }) {
 }
 
 function Dashboard() {
-  const [data, setData] = useState(null); const [error, setError] = useState("");
-  useEffect(() => { request("/api/dashboard").then(setData).catch((e) => setError(e.message)); }, []);
+  const [data, setData] = useState(null); const [mapRecords, setMapRecords] = useState([]); const [error, setError] = useState("");
+  useEffect(() => { Promise.all([request("/api/dashboard"), request("/api/dashboard/map")]).then(([summary, records]) => { setData(summary); setMapRecords(records); }).catch((e) => setError(e.message)); }, []);
   if (error) return <p className="error">{error}</p>; if (!data) return <p>Loading dashboard...</p>;
   return <><p className="eyebrow">Operations dashboard</p><h1>Overview</h1>
     <div className="stats">{[["Total cases", data.total_cases], ["Open", data.open_cases], ["Under review", data.under_review_cases], ["Resolved", data.resolved_cases]].map(([label, value]) => <div className="card stat" key={label}><span>{label}</span><strong>{value}</strong></div>)}</div>
+    <section className="card"><h2>India map</h2><p>Only saved coordinates are shown. Records without coordinates are omitted.</p><MapContainer className="map" center={[22.5, 79]} zoom={4} scrollWheelZoom><TileLayer attribution='&copy; OpenStreetMap contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />{mapRecords.map((record) => <CircleMarker key={`${record.record_type}-${record.id}`} center={[record.latitude, record.longitude]} pathOptions={{ color: record.record_type === "case" ? "#536dfe" : "#e67e22" }}><Popup><strong>{record.label}</strong><br />{record.record_type} · {record.status}{record.observed_at && <><br />{new Date(record.observed_at).toLocaleString()}</>}</Popup></CircleMarker>)}</MapContainer></section>
     <section className="card"><h2>Recent activity</h2>{data.recent_activity.length ? data.recent_activity.map((item) => <p key={item.id}><Link to={`/cases/${item.id}`}>{item.name}</Link> · {item.status}</p>) : <p>No cases yet.</p>}</section>
+    <AdminImport />
   </>;
+}
+
+function AdminImport() {
+  const user = JSON.parse(localStorage.getItem("user") || "null"); const [file, setFile] = useState(null); const [message, setMessage] = useState(""); const [error, setError] = useState(""); const [smtp, setSmtp] = useState(null);
+  useEffect(() => { request("/api/admin/notification-status").then((status) => setSmtp(status.smtp_configured)).catch(() => {}); }, []);
+  if (user?.role !== "admin") return null;
+  const submit = async (e) => { e.preventDefault(); const data = new FormData(); data.append("file", file); try { const result = await request("/api/admin/demo-import", { method: "POST", body: data }); setMessage(`Imported ${result.imported_cases} cases and ${result.imported_sightings} sightings.`); setError(result.errors?.join("; ") || ""); } catch (err) { setError(err.message); } };
+  return <section className="card"><h2>Import synthetic demo data</h2><p>Administrator-only. CSV rows must be synthetic sample records; no facial representations are imported.</p><p>Email notifications: {smtp === null ? "checking configuration..." : smtp ? "configured" : "not configured"}</p><form onSubmit={submit}><input type="file" accept=".csv,text/csv" required onChange={(e) => setFile(e.target.files[0])} /><button className="primary">Import CSV</button></form>{message && <p className="success">{message}</p>}{error && <p className="error">{error}</p>}</section>;
 }
 
 function Cases() {
@@ -73,9 +85,9 @@ function Cases() {
 }
 
 function CaseForm() {
-  const navigate = useNavigate(); const [form, setForm] = useState({ name: "", description: "", last_seen_location: "", last_seen_at: "" }); const [error, setError] = useState("");
-  const submit = async (e) => { e.preventDefault(); try { const item = await request("/api/cases", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, last_seen_at: form.last_seen_at || null }) }); navigate(`/cases/${item.id}`); } catch (err) { setError(err.message); } };
-  return <section className="card"><h1>New missing-person case</h1><form onSubmit={submit}><label>Name<input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label><label>Description<textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label><label>Last-seen location<input value={form.last_seen_location} onChange={(e) => setForm({ ...form, last_seen_location: e.target.value })} /></label><label>Last-seen time<input type="datetime-local" value={form.last_seen_at} onChange={(e) => setForm({ ...form, last_seen_at: e.target.value })} /></label>{error && <p className="error">{error}</p>}<button className="primary">Create case</button></form></section>;
+  const navigate = useNavigate(); const [form, setForm] = useState({ name: "", description: "", last_seen_location: "", last_seen_at: "", last_seen_latitude: "", last_seen_longitude: "" }); const [error, setError] = useState("");
+  const submit = async (e) => { e.preventDefault(); try { const item = await request("/api/cases", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, last_seen_at: form.last_seen_at || null, last_seen_latitude: form.last_seen_latitude === "" ? null : Number(form.last_seen_latitude), last_seen_longitude: form.last_seen_longitude === "" ? null : Number(form.last_seen_longitude) }) }); navigate(`/cases/${item.id}`); } catch (err) { setError(err.message); } };
+  return <section className="card"><h1>New missing-person case</h1><form onSubmit={submit}><label>Name<input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label><label>Description<textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label><label>Last-seen location<input value={form.last_seen_location} onChange={(e) => setForm({ ...form, last_seen_location: e.target.value })} /></label><label>Last-seen time<input type="datetime-local" value={form.last_seen_at} onChange={(e) => setForm({ ...form, last_seen_at: e.target.value })} /></label><label>Last-seen latitude<input type="number" step="any" min="-90" max="90" value={form.last_seen_latitude} onChange={(e) => setForm({ ...form, last_seen_latitude: e.target.value })} /></label><label>Last-seen longitude<input type="number" step="any" min="-180" max="180" value={form.last_seen_longitude} onChange={(e) => setForm({ ...form, last_seen_longitude: e.target.value })} /></label>{error && <p className="error">{error}</p>}<button className="primary">Create case</button></form></section>;
 }
 
 function CaseDetail() {
@@ -90,9 +102,9 @@ function CaseDetail() {
 }
 
 function PublicSighting() {
-  const [form, setForm] = useState({ case_id: "", observed_at: "", location: "", description: "" }); const [image, setImage] = useState(null); const [message, setMessage] = useState(""); const [error, setError] = useState("");
+  const [form, setForm] = useState({ case_id: "", observed_at: "", location: "", latitude: "", longitude: "", description: "" }); const [image, setImage] = useState(null); const [message, setMessage] = useState(""); const [error, setError] = useState("");
   const submit = async (e) => { e.preventDefault(); const data = new FormData(); Object.entries(form).forEach(([key, value]) => data.append(key, value)); data.append("image", image); try { const result = await request("/api/public/sightings", { method: "POST", body: data }); setMessage(result.message); } catch (err) { setError(err.message); } };
-  return <section className="card"><p className="eyebrow">Public portal</p><h1>Submit a possible sighting</h1><p>Only submit information you are authorized to share. Case records remain private.</p><form onSubmit={submit}><label>Case ID<input required value={form.case_id} onChange={(e) => setForm({ ...form, case_id: e.target.value })} /></label><label>Observation time<input type="datetime-local" required value={form.observed_at} onChange={(e) => setForm({ ...form, observed_at: e.target.value })} /></label><label>Location<input required value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} /></label><label>Description<textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label><label>Photograph<input type="file" accept="image/jpeg,image/png,image/webp" required onChange={(e) => setImage(e.target.files[0])} /></label>{error && <p className="error">{error}</p>}{message && <p className="success">{message}</p>}<button className="primary">Submit sighting</button></form></section>;
+  return <section className="card"><p className="eyebrow">Public portal</p><h1>Submit a possible sighting</h1><p>Only submit information you are authorized to share. Case records remain private.</p><form onSubmit={submit}><label>Case ID<input required value={form.case_id} onChange={(e) => setForm({ ...form, case_id: e.target.value })} /></label><label>Observation time<input type="datetime-local" required value={form.observed_at} onChange={(e) => setForm({ ...form, observed_at: e.target.value })} /></label><label>Location<input required value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} /></label><label>Latitude<input type="number" step="any" min="-90" max="90" value={form.latitude} onChange={(e) => setForm({ ...form, latitude: e.target.value })} /></label><label>Longitude<input type="number" step="any" min="-180" max="180" value={form.longitude} onChange={(e) => setForm({ ...form, longitude: e.target.value })} /></label><label>Description<textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label><label>Photograph<input type="file" accept="image/jpeg,image/png,image/webp" required onChange={(e) => setImage(e.target.files[0])} /></label>{error && <p className="error">{error}</p>}{message && <p className="success">{message}</p>}<button className="primary">Submit sighting</button></form></section>;
 }
 
 function App() {
