@@ -1,7 +1,7 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, Date, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -38,6 +38,9 @@ class MissingPersonCase(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="open", nullable=False)
+    date_of_birth: Mapped[date | None] = mapped_column(Date)
+    last_seen_location: Mapped[str | None] = mapped_column(String(255))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     created_by: Mapped[User] = relationship(back_populates="cases")
     reference_images: Mapped[list["ReferenceImage"]] = relationship(
@@ -70,6 +73,8 @@ class Sighting(TimestampMixin, Base):
     storage_key: Mapped[str | None] = mapped_column(String(512))
     status: Mapped[str] = mapped_column(String(32), default="pending_review", nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    location: Mapped[str | None] = mapped_column(String(255))
 
     case: Mapped[MissingPersonCase] = relationship(back_populates="sightings")
 

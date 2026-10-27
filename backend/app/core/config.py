@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     secret_key: str
     access_token_expire_minutes: int = 30
     frontend_origin: str = "http://localhost:5173"
+    max_upload_size_bytes: int = 5 * 1024 * 1024
+    upload_directory: str = "uploads"
+    rate_limit_per_minute: int = 10
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
