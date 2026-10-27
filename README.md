@@ -1,8 +1,8 @@
 # Missing Person Detection
 
-Foundation for a missing-person detection platform using **YOLOv8** for object
-detection and **DeepFace** for facial recognition. The AI pipeline and product
-workflows are intentionally not implemented yet.
+Missing-person detection platform using **YOLOv8** for face detection and
+**DeepFace** for facial recognition. AI search results are always subject to
+authorized human review.
 
 ## Architecture
 
@@ -54,3 +54,26 @@ workflows are intentionally not implemented yet.
 
 The API health check is available at `http://localhost:8000/health` and the
 frontend at the Vite URL shown in the terminal.
+
+## AI processing (Chunk 3)
+
+Install the AI dependencies from `backend/requirements.txt`, download a
+YOLOv8-compatible face detector weight file separately, and set
+`FACE_DETECTOR_WEIGHTS` to its path. Standard COCO YOLO weights are not a
+face detector and are not suitable here. DeepFace uses the configured
+`DEEPFACE_MODEL_NAME` and cosine-distance threshold; its model assets may be
+downloaded by DeepFace on first use, depending on the selected model.
+
+After configuring PostgreSQL and the AI settings:
+
+```powershell
+cd backend
+alembic upgrade head
+uvicorn app.main:app --reload
+```
+
+Image searches are queued as jobs and video searches run in FastAPI background
+tasks. Search results are possible matches only and require authorized human
+review. Video processing requires OpenCV-compatible codecs and does not
+provide a durable external worker queue; a process restart stops in-flight
+background jobs.

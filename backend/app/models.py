@@ -1,7 +1,8 @@
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import DateTime, Date, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, Date, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -60,6 +61,8 @@ class ReferenceImage(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("missing_person_cases.id"), nullable=False)
     storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    representation: Mapped[list[float] | None] = mapped_column(JSONB)
+    processing_signature: Mapped[str | None] = mapped_column(String(255))
 
     case: Mapped[MissingPersonCase] = relationship(back_populates="reference_images")
 
@@ -86,6 +89,9 @@ class SearchJob(TimestampMixin, Base):
     case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("missing_person_cases.id"), nullable=False)
     job_type: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    query_storage_key: Mapped[str | None] = mapped_column(String(512))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     case: Mapped[MissingPersonCase] = relationship(back_populates="search_jobs")
     candidate_matches: Mapped[list["CandidateMatch"]] = relationship(
@@ -101,8 +107,17 @@ class CandidateMatch(TimestampMixin, Base):
     candidate_storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
     confidence: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(32), default="unreviewed", nullable=False)
+    reference_image_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("reference_images.id"))
+    distance: Mapped[float | None] = mapped_column(Float)
+    frame_timestamp_seconds: Mapped[float | None] = mapped_column(Float)
+    source_storage_key: Mapped[str | None] = mapped_column(String(512))
 
     search_job: Mapped[SearchJob] = relationship(back_populates="candidate_matches")
+    reference_image: Mapped[ReferenceImage | None] = relationship()
+
+    @property
+    def case_id(self) -> uuid.UUID:
+        return self.search_job.case_id
 
 
 class AuditRecord(TimestampMixin, Base):

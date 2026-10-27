@@ -13,6 +13,14 @@ class Settings(BaseSettings):
     max_upload_size_bytes: int = 5 * 1024 * 1024
     upload_directory: str = "uploads"
     rate_limit_per_minute: int = 10
+    face_detector_weights: str = "weights/yolov8n-face.pt"
+    deepface_model_name: str = "Facenet512"
+    deepface_detector_backend: str = "skip"
+    face_match_distance_threshold: float = 0.30
+    video_frame_interval_seconds: float = 1.0
+    max_video_size_bytes: int = 50 * 1024 * 1024
+    max_video_duration_seconds: int = 300
+    ai_image_size: int = 640
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

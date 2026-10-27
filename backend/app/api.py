@@ -1,11 +1,12 @@
 import time
 import uuid
+import logging
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
 import jwt
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -18,12 +19,24 @@ from app.core.security import (
     verify_password,
 )
 from app.db.session import get_db
+from app.db.session import SessionLocal
 from app.models import AuditRecord, MissingPersonCase, ReferenceImage, Sighting, User
+from app.models import CandidateMatch, SearchJob
+from app.services.ai import (
+    cosine_distance,
+    decode_image,
+    detect_faces,
+    processing_signature,
+    represent,
+)
 from app.schemas import (
     CaseCreate,
     CaseResponse,
     CaseUpdate,
     DashboardResponse,
+    CandidateReview,
+    CandidateResponse,
+    SearchJobResponse,
     LoginRequest,
     PublicSightingResponse,
     TokenResponse,
@@ -34,6 +47,7 @@ from app.schemas import (
 router = APIRouter(prefix="/api")
 public_router = APIRouter(prefix="/api/public")
 rate_buckets: dict[str, list[float]] = defaultdict(list)
+logger = logging.getLogger(__name__)
 
 
 def current_user(request: Request, db: Session = Depends(get_db)) -> User:
@@ -81,6 +95,130 @@ async def store_image(upload: UploadFile) -> str:
     key = f"{uuid.uuid4()}.bin"
     (directory / key).write_bytes(content)
     return key
+
+
+async def store_video(upload: UploadFile) -> str:
+    allowed = {"video/mp4", "video/quicktime", "video/webm", "video/x-msvideo"}
+    if upload.content_type not in allowed:
+        raise HTTPException(status_code=415, detail="Only MP4, MOV, WebM, and AVI videos are supported")
+    content = await upload.read(settings.max_video_size_bytes + 1)
+    if len(content) > settings.max_video_size_bytes:
+        raise HTTPException(status_code=413, detail="Video exceeds the size limit")
+    key = f"{uuid.uuid4()}.video"
+    directory = Path(settings.upload_directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / key).write_bytes(content)
+    return key
+
+
+def permitted_case(case: MissingPersonCase | None, user: User) -> bool:
+    return case is not None and (user.role == "admin" or case.created_by_id == user.id)
+
+
+def process_image_job(job_id: uuid.UUID, content: bytes, query_storage_key: str) -> None:
+    db = SessionLocal()
+    try:
+        job = db.get(SearchJob, job_id)
+        if job is None:
+            return
+        job.status, job.progress = "processing", 10
+        db.commit()
+        faces = detect_faces(decode_image(content))
+        if not faces:
+            job.status, job.progress = "completed", 100
+            db.commit()
+            return
+        job.progress = 40
+        references = db.scalars(
+            select(ReferenceImage).join(MissingPersonCase).where(
+                ReferenceImage.case_id == job.case_id,
+                ReferenceImage.representation.is_not(None),
+            )
+        ).all()
+        matches_by_reference = {}
+        for face in faces:
+            query = represent(face.image)
+            for reference in references:
+                distance = cosine_distance(query, reference.representation)
+                if distance <= settings.face_match_distance_threshold:
+                    previous = matches_by_reference.get(reference.id)
+                    if previous is None or distance < previous[0]:
+                        matches_by_reference[reference.id] = (distance, reference)
+        matches = list(matches_by_reference.values())
+        for distance, reference in sorted(matches, key=lambda value: value[0]):
+            db.add(CandidateMatch(
+                search_job_id=job.id, reference_image_id=reference.id,
+                candidate_storage_key=reference.storage_key, distance=distance,
+                status="unreviewed",
+            ))
+        job.status, job.progress = "completed", 100
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        job = db.get(SearchJob, job_id)
+        if job:
+            job.status, job.error_message = "failed", str(exc)
+            db.commit()
+    finally:
+        Path(settings.upload_directory, query_storage_key).unlink(missing_ok=True)
+        db.close()
+
+
+def process_video_job(job_id: uuid.UUID, video_path: str) -> None:
+    import cv2
+
+    db = SessionLocal()
+    job = db.get(SearchJob, job_id)
+    capture = cv2.VideoCapture(video_path)
+    try:
+        if not capture.isOpened():
+            raise ValueError("Video could not be opened")
+        fps = capture.get(cv2.CAP_PROP_FPS) or 0
+        frame_count = capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        duration = frame_count / fps if fps else 0
+        if duration > settings.max_video_duration_seconds:
+            raise ValueError("Video exceeds the duration limit")
+        references = db.scalars(
+            select(ReferenceImage).join(MissingPersonCase).where(
+                ReferenceImage.case_id == job.case_id,
+                ReferenceImage.representation.is_not(None),
+            )
+        ).all()
+        next_sample = 0.0
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            timestamp = capture.get(cv2.CAP_PROP_POS_MSEC) / 1000
+            if timestamp < next_sample:
+                continue
+            next_sample = timestamp + settings.video_frame_interval_seconds
+            image = decode_image(cv2.imencode(".jpg", frame)[1].tobytes())
+            faces = detect_faces(image)
+            for face in faces:
+                query = represent(face.image)
+                for reference in references:
+                    distance = cosine_distance(query, reference.representation)
+                    if distance <= settings.face_match_distance_threshold:
+                        db.add(CandidateMatch(
+                            search_job_id=job.id, reference_image_id=reference.id,
+                            candidate_storage_key=reference.storage_key, distance=distance,
+                            frame_timestamp_seconds=timestamp, status="unreviewed",
+                            source_storage_key=job.query_storage_key,
+                        ))
+            db.commit()
+        job.status, job.progress = "completed", 100
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        job = db.get(SearchJob, job_id)
+        if job:
+            job.status, job.error_message = "failed", str(exc)
+            db.commit()
+    finally:
+        capture.release()
+        Path(video_path).unlink(missing_ok=True)
+        db.close()
 
 
 @router.post("/auth/register", response_model=TokenResponse, status_code=201)
@@ -176,7 +314,17 @@ async def upload_reference_image(case_id: uuid.UUID, image: UploadFile = File(..
     if case is None or (user.role != "admin" and case.created_by_id != user.id):
         raise HTTPException(status_code=404, detail="Case not found")
     key = await store_image(image)
-    record = ReferenceImage(case_id=case_id, storage_key=key)
+    record = ReferenceImage(
+        case_id=case_id, storage_key=key, processing_signature=processing_signature()
+    )
+    try:
+        content = (Path(settings.upload_directory) / key).read_bytes()
+        faces = detect_faces(decode_image(content))
+        if faces:
+            record.representation = represent(faces[0].image)
+    except Exception as exc:
+        logger.warning("Reference representation unavailable for %s: %s", record.id, exc)
+        record.representation = None
     db.add(record)
     audit(db, user, "reference_image.uploaded", case_id)
     db.commit()
@@ -228,3 +376,93 @@ async def submit_sighting(
     db.add(sighting)
     db.commit()
     return PublicSightingResponse(id=sighting.id, status=sighting.status, message="Sighting submitted for review")
+
+
+@router.post("/cases/{case_id}/search/image", response_model=SearchJobResponse, status_code=202)
+async def search_image(
+    case_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    image: UploadFile = File(...),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> SearchJob:
+    case = db.get(MissingPersonCase, case_id)
+    if not permitted_case(case, user):
+        raise HTTPException(status_code=404, detail="Case not found")
+    content = await image.read(settings.max_upload_size_bytes + 1)
+    if len(content) > settings.max_upload_size_bytes:
+        raise HTTPException(status_code=413, detail="Image exceeds the size limit")
+    try:
+        decode_image(content)
+    except ValueError as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+    key = f"{uuid.uuid4()}.search"
+    Path(settings.upload_directory).mkdir(parents=True, exist_ok=True)
+    (Path(settings.upload_directory) / key).write_bytes(content)
+    job = SearchJob(case_id=case_id, job_type="image", status="queued", query_storage_key=key)
+    db.add(job)
+    audit(db, user, "search.image.created", case_id)
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(process_image_job, job.id, content, key)
+    return job
+
+
+@router.post("/cases/{case_id}/search/video", response_model=SearchJobResponse, status_code=202)
+async def search_video(
+    case_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    video: UploadFile = File(...),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> SearchJob:
+    case = db.get(MissingPersonCase, case_id)
+    if not permitted_case(case, user):
+        raise HTTPException(status_code=404, detail="Case not found")
+    key = await store_video(video)
+    job = SearchJob(case_id=case_id, job_type="video", status="queued", query_storage_key=key)
+    db.add(job)
+    audit(db, user, "search.video.created", case_id)
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(
+        process_video_job, job.id, str(Path(settings.upload_directory) / key)
+    )
+    return job
+
+
+@router.get("/search-jobs/{job_id}", response_model=SearchJobResponse)
+def get_search_job(
+    job_id: uuid.UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> SearchJob:
+    job = db.get(SearchJob, job_id)
+    if job is None or not permitted_case(job.case, user):
+        raise HTTPException(status_code=404, detail="Search job not found")
+    return job
+
+
+@router.get("/search-jobs", response_model=list[SearchJobResponse])
+def list_search_jobs(
+    user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> list[SearchJob]:
+    query = select(SearchJob).join(MissingPersonCase)
+    if user.role != "admin":
+        query = query.where(MissingPersonCase.created_by_id == user.id)
+    return list(db.scalars(query.order_by(SearchJob.created_at.desc())))
+
+
+@router.patch("/candidate-matches/{candidate_id}", response_model=CandidateResponse)
+def review_candidate(
+    candidate_id: uuid.UUID,
+    payload: CandidateReview,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> CandidateMatch:
+    candidate = db.get(CandidateMatch, candidate_id)
+    if candidate is None or not permitted_case(candidate.search_job.case, user):
+        raise HTTPException(status_code=404, detail="Candidate match not found")
+    candidate.status = payload.status
+    audit(db, user, f"candidate.{payload.status}", candidate.id)
+    db.commit()
+    db.refresh(candidate)
+    return candidate

@@ -66,6 +66,31 @@ class DashboardResponse(BaseModel):
     recent_activity: list[dict]
 
 
+class CandidateResponse(BaseModel):
+    id: UUID
+    case_id: UUID
+    status: str
+    distance: float | None
+    frame_timestamp_seconds: float | None
+    source_storage_key: str | None
+    created_at: datetime
+
+
+class SearchJobResponse(BaseModel):
+    id: UUID
+    case_id: UUID
+    job_type: str
+    status: str
+    progress: int
+    error_message: str | None
+    created_at: datetime
+    candidates: list[CandidateResponse] = []
+
+
+class CandidateReview(BaseModel):
+    status: str = Field(pattern="^(under_review|possible_match|not_a_match)$")
+
+
 class PublicSightingResponse(BaseModel):
     id: UUID
     status: str
