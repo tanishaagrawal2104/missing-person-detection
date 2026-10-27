@@ -59,6 +59,25 @@ class ImportSummary(BaseModel):
     errors: list[str]
 
 
+class SightingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    case_id: UUID
+    status: str
+    source: str
+    location: str | None
+    latitude: float | None
+    longitude: float | None
+    observed_at: datetime | None
+    notes: str | None
+    created_at: datetime
+
+
+class SightingReview(BaseModel):
+    status: str = Field(pattern="^(pending_review|under_review|verified|rejected)$")
+
+
 class ReferenceImageResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

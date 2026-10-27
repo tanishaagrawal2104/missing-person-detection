@@ -42,6 +42,8 @@ from app.schemas import (
     ImportSummary,
     MapRecord,
     SearchJobResponse,
+    SightingResponse,
+    SightingReview,
     LoginRequest,
     PublicSightingResponse,
     TokenResponse,
@@ -77,7 +79,12 @@ def require_admin(user: User = Depends(current_user)) -> User:
 
 
 def audit(db: Session, user: User, action: str, entity_id: uuid.UUID | None = None) -> None:
-    db.add(AuditRecord(user_id=user.id, action=action, entity_type="case", entity_id=entity_id))
+    db.add(AuditRecord(
+        user_id=user.id,
+        action=action,
+        entity_type=action.split(".", 1)[0],
+        entity_id=entity_id,
+    ))
 
 
 async def store_image(upload: UploadFile) -> str:
@@ -409,6 +416,37 @@ def get_case(case_id: uuid.UUID, user: User = Depends(current_user), db: Session
     if case is None or (user.role != "admin" and case.created_by_id != user.id):
         raise HTTPException(status_code=404, detail="Case not found")
     return case
+
+
+@router.get("/sightings", response_model=list[SightingResponse])
+def list_sightings(
+    status_filter: str | None = None,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> list[Sighting]:
+    query = select(Sighting).join(MissingPersonCase)
+    if user.role != "admin":
+        query = query.where(MissingPersonCase.created_by_id == user.id)
+    if status_filter:
+        query = query.where(Sighting.status == status_filter)
+    return list(db.scalars(query.order_by(Sighting.created_at.desc())))
+
+
+@router.patch("/sightings/{sighting_id}", response_model=SightingResponse)
+def review_sighting(
+    sighting_id: uuid.UUID,
+    payload: SightingReview,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Sighting:
+    sighting = db.get(Sighting, sighting_id)
+    if sighting is None or not permitted_case(sighting.case, user):
+        raise HTTPException(status_code=404, detail="Sighting not found")
+    sighting.status = payload.status
+    audit(db, user, f"sighting.{payload.status}", sighting.id)
+    db.commit()
+    db.refresh(sighting)
+    return sighting
 
 
 @router.patch("/cases/{case_id}", response_model=CaseResponse)

@@ -100,3 +100,23 @@ CSV must contain `case_key`, `name`, and `status`; optional columns include
 `sighting_latitude`, and `sighting_longitude`. Imports are transactional,
 duplicate keys are rejected, and no images, embeddings, or AI matches are
 created.
+
+## Final integration notes
+
+The public sighting page is available at `/sighting` without authentication.
+Protected users review sightings from the related case detail page. Admin-only
+controls are enforced by the API even if a frontend control is hidden.
+
+The complete migration chain is:
+
+```text
+20261027_0001_initial_schema
+ -> 20261027_0002_case_details
+ -> 20261027_0003_ai_processing
+ -> 20261027_0004_geo
+```
+
+Without SMTP settings, case and sighting workflows still work; notification
+delivery is simply disabled. If SMTP delivery fails after a sighting is saved,
+the failure is logged and the saved record remains intact. Uploaded files are
+stored under `UPLOAD_DIRECTORY`, which must remain outside public static assets.
