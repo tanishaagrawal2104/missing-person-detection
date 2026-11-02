@@ -37,6 +37,30 @@ function Layout({ children }) {
   </div>;
 }
 
+function ReferenceThumbnail({ imageId }) {
+  const [url, setUrl] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl = "";
+    fetch(`${API}/api/images/${imageId}`, {
+      headers: { Authorization: `Bearer ${auth.token}` },
+    }).then((response) => {
+      if (!response.ok) throw new Error("Reference image unavailable");
+      return response.blob();
+    }).then((blob) => {
+      objectUrl = URL.createObjectURL(blob);
+      if (active) setUrl(objectUrl);
+    }).catch(() => {});
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [imageId]);
+
+  return url ? <img className="candidate-thumbnail" src={url} alt="Reference face" /> : <span>Reference image unavailable</span>;
+}
+
 function AuthPage({ register = false }) {
   const navigate = useNavigate();
   const [form, setForm] = useState({ email: "", password: "" });
@@ -77,7 +101,9 @@ function AdminImport() {
 function Cases() {
   const [cases, setCases] = useState([]); const [search, setSearch] = useState(""); const [error, setError] = useState("");
   const load = () => request(`/api/cases?search=${encodeURIComponent(search)}`).then(setCases).catch((e) => setError(e.message));
-  useEffect(load, []);
+  useEffect(() => {
+    load();
+  }, []);
   return <><div className="row"><div><p className="eyebrow">Case management</p><h1>Cases</h1></div><Link className="button primary" to="/cases/new">New case</Link></div>
     <form className="search" onSubmit={(e) => { e.preventDefault(); load(); }}><input placeholder="Search cases" value={search} onChange={(e) => setSearch(e.target.value)} /><button>Search</button></form>
     {error && <p className="error">{error}</p>}<div className="list">{cases.map((item) => <Link className="card" to={`/cases/${item.id}`} key={item.id}><h2>{item.name}</h2><p>{item.last_seen_location || "Location not provided"} · {item.status}</p></Link>)}{!cases.length && <p>No cases found.</p>}</div>
@@ -91,16 +117,37 @@ function CaseForm() {
 }
 
 function CaseDetail() {
-  const { id } = useParams(); const [item, setItem] = useState(null); const [error, setError] = useState(""); const [image, setImage] = useState(null); const [searchFile, setSearchFile] = useState(null); const [jobs, setJobs] = useState([]); const [sightings, setSightings] = useState([]); const [message, setMessage] = useState("");
+  const { id } = useParams(); const [item, setItem] = useState(null); const [error, setError] = useState(""); const [image, setImage] = useState(null); const [searchFile, setSearchFile] = useState(null); const [jobs, setJobs] = useState([]); const [sightings, setSightings] = useState([]); const [message, setMessage] = useState(""); const [refreshKey, setRefreshKey] = useState(0);
   useEffect(() => { request(`/api/cases/${id}`).then(setItem).catch((e) => setError(e.message)); }, [id]);
-  useEffect(() => { request("/api/search-jobs").then((items) => setJobs(items.filter((job) => job.case_id === id))).catch(() => {}); }, [id]);
+  useEffect(() => {
+    let stopped = false;
+    let timer;
+    const load = async () => {
+      try {
+        const items = await request("/api/search-jobs");
+        if (stopped) return;
+        const caseJobs = items.filter((job) => job.case_id === id);
+        setJobs(caseJobs);
+        if (caseJobs.some((job) => job.status === "queued" || job.status === "processing")) {
+          timer = setTimeout(load, 1500);
+        }
+      } catch (e) {
+        if (!stopped) setError(e.message);
+      }
+    };
+    load();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [id, refreshKey]);
   useEffect(() => { request("/api/sightings").then((items) => setSightings(items.filter((sighting) => sighting.case_id === id))).catch(() => {}); }, [id]);
   const upload = async (e) => { e.preventDefault(); const data = new FormData(); data.append("image", image); try { await request(`/api/cases/${id}/images`, { method: "POST", body: data }); setMessage("Reference image uploaded."); } catch (err) { setError(err.message); } };
-  const search = async (e, type) => { e.preventDefault(); const data = new FormData(); data.append(type, searchFile); try { const job = await request(`/api/cases/${id}/search/${type}`, { method: "POST", body: data }); setJobs([job, ...jobs]); setMessage(`${type} search queued. Results require human verification.`); } catch (err) { setError(err.message); } };
-  const review = async (candidateId, status) => { try { await request(`/api/candidate-matches/${candidateId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) }); setMessage("Candidate review saved."); } catch (err) { setError(err.message); } };
+  const search = async (e, type) => { e.preventDefault(); const data = new FormData(); data.append(type, searchFile); try { const job = await request(`/api/cases/${id}/search/${type}`, { method: "POST", body: data }); setJobs([job, ...jobs]); setRefreshKey((value) => value + 1); setMessage(`${type} search queued. Results require human verification.`); } catch (err) { setError(err.message); } };
+  const review = async (candidateId, status) => { try { const updated = await request(`/api/candidate-matches/${candidateId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) }); setJobs((current) => current.map((job) => ({ ...job, candidates: job.candidates?.map((candidate) => candidate.id === updated.id ? updated : candidate) }))); setMessage("Candidate review saved."); } catch (err) { setError(err.message); } };
   const reviewSighting = async (sightingId, status) => { try { const updated = await request(`/api/sightings/${sightingId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) }); setSightings(sightings.map((sighting) => sighting.id === updated.id ? updated : sighting)); setMessage("Sighting review saved."); } catch (err) { setError(err.message); } };
   if (error) return <p className="error">{error}</p>; if (!item) return <p>Loading case...</p>;
-  return <section><p className="eyebrow">Case details</p><h1>{item.name}</h1><div className="card"><p>{item.description || "No description provided."}</p><p><strong>Status:</strong> {item.status}</p><p><strong>Last seen:</strong> {item.last_seen_location || "Not provided"}</p><h2>Reference photographs</h2><form onSubmit={upload}><input type="file" accept="image/jpeg,image/png,image/webp" required onChange={(e) => setImage(e.target.files[0])} /><button>Upload image</button></form><h2>AI search</h2><p>Results are possible matches only and require human verification.</p><form onSubmit={(e) => search(e, "image")}><input type="file" accept="image/jpeg,image/png,image/webp" required onChange={(e) => setSearchFile(e.target.files[0])} /><button>Search image</button></form><form onSubmit={(e) => search(e, "video")}><input type="file" accept="video/mp4,video/webm,video/quicktime" required onChange={(e) => setSearchFile(e.target.files[0])} /><button>Search video</button></form>{message && <p className="success">{message}</p>}</div><div className="card"><h2>Reported sightings</h2>{sightings.length ? sightings.map((sighting) => <p key={sighting.id}>{sighting.observed_at ? new Date(sighting.observed_at).toLocaleString() : "Time unavailable"} · {sighting.location || "Location unavailable"} · {sighting.status} <button onClick={() => reviewSighting(sighting.id, "under_review")}>Review</button> <button onClick={() => reviewSighting(sighting.id, "verified")}>Verify</button> <button onClick={() => reviewSighting(sighting.id, "rejected")}>Reject</button></p>) : <p>No sightings submitted.</p>}</div><div className="card"><h2>Search history</h2>{jobs.map((job) => <div key={job.id}><p>{job.job_type} · {job.status} · {job.progress}%</p>{job.error_message && <p className="error">{job.error_message}</p>}{job.candidates?.map((candidate) => <p key={candidate.id}>Possible match · distance {candidate.distance?.toFixed(3)}{candidate.frame_timestamp_seconds != null && ` · ${candidate.frame_timestamp_seconds.toFixed(1)}s`} · {candidate.status} <button onClick={() => review(candidate.id, "under_review")}>Review</button> <button onClick={() => review(candidate.id, "possible_match")}>Possible match</button> <button onClick={() => review(candidate.id, "not_a_match")}>Not a match</button></p>)}</div>)}</div></section>;
+  return <section><p className="eyebrow">Case details</p><h1>{item.name}</h1><div className="card"><p>{item.description || "No description provided."}</p><p><strong>Status:</strong> {item.status}</p><p><strong>Last seen:</strong> {item.last_seen_location || "Not provided"}</p><h2>Reference photographs</h2><form onSubmit={upload}><input type="file" accept="image/jpeg,image/png,image/webp" required onChange={(e) => setImage(e.target.files[0])} /><button>Upload image</button></form><h2>AI search</h2><p>Results are possible matches only and require human verification.</p><form onSubmit={(e) => search(e, "image")}><input type="file" accept="image/jpeg,image/png,image/webp" required onChange={(e) => setSearchFile(e.target.files[0])} /><button>Search image</button></form><form onSubmit={(e) => search(e, "video")}><input type="file" accept="video/mp4,video/webm,video/quicktime" required onChange={(e) => setSearchFile(e.target.files[0])} /><button>Search video</button></form>{message && <p className="success">{message}</p>}</div><div className="card"><h2>Reported sightings</h2>{sightings.length ? sightings.map((sighting) => <p key={sighting.id}>{sighting.observed_at ? new Date(sighting.observed_at).toLocaleString() : "Time unavailable"} · {sighting.location || "Location unavailable"} · {sighting.status} <button onClick={() => reviewSighting(sighting.id, "under_review")}>Review</button> <button onClick={() => reviewSighting(sighting.id, "verified")}>Verify</button> <button onClick={() => reviewSighting(sighting.id, "rejected")}>Reject</button></p>) : <p>No sightings submitted.</p>}</div><div className="card"><h2>Search history</h2>{jobs.map((job) => <div key={job.id}><p>{job.job_type} · {job.status} · {job.progress}%</p>{job.error_message && <p className="error">{job.error_message}</p>}{job.status === "completed" && (job.candidates?.length ? <div><h3>Candidate matches</h3>{job.candidates.map((candidate) => <div className="candidate-match" key={candidate.id}><div>{candidate.reference_image_id ? <ReferenceThumbnail imageId={candidate.reference_image_id} /> : <span>Reference image unavailable</span>}</div><div><strong>{job.case_name}</strong><p>Case ID: {job.case_id}</p><p>Similarity distance: {candidate.distance?.toFixed(3) ?? "Unavailable"}</p>{candidate.frame_timestamp_seconds != null && <p>Video timestamp: {candidate.frame_timestamp_seconds.toFixed(1)}s</p>}<p>Status: {candidate.status}</p><button onClick={() => review(candidate.id, "under_review")}>Review</button> <button onClick={() => review(candidate.id, "possible_match")}>Possible match</button> <button onClick={() => review(candidate.id, "not_a_match")}>Not a match</button></div></div>)}</div> : <p>No candidate matches were found for this search.</p>)}</div>)}</div></section>;
 }
 
 function PublicSighting() {

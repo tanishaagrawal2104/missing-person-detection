@@ -1,4 +1,5 @@
 import hashlib
+import math
 from dataclasses import dataclass
 from functools import lru_cache
 from io import BytesIO
@@ -60,6 +61,24 @@ def detect_faces(image: Image.Image) -> list[DetectedFace]:
     return faces
 
 
+def validate_embedding(value: object) -> list[float]:
+    if value is None or isinstance(value, (str, bytes)):
+        raise ValueError("Embedding is missing or not a sequence")
+    try:
+        values = list(value)  # type: ignore[arg-type]
+    except TypeError as exc:
+        raise ValueError("Embedding is not a sequence") from exc
+    if not values:
+        raise ValueError("Embedding is empty")
+    try:
+        embedding = [float(item) for item in values]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Embedding contains non-numeric values") from exc
+    if not all(math.isfinite(item) for item in embedding):
+        raise ValueError("Embedding contains non-finite values")
+    return embedding
+
+
 def represent(face: Image.Image) -> list[float]:
     from deepface import DeepFace
 
@@ -69,14 +88,35 @@ def represent(face: Image.Image) -> list[float]:
         detector_backend=settings.deepface_detector_backend,
         enforce_detection=False,
     )
-    if not result or "embedding" not in result[0]:
+    if not isinstance(result, list) or not result or not isinstance(result[0], dict):
         raise ValueError("DeepFace did not produce a representation")
-    return [float(value) for value in result[0]["embedding"]]
+    try:
+        return validate_embedding(result[0].get("embedding"))
+    except ValueError as exc:
+        raise ValueError("DeepFace returned an invalid representation") from exc
 
 
-def cosine_distance(left: list[float], right: list[float]) -> float:
-    left_array, right_array = np.asarray(left), np.asarray(right)
-    denominator = np.linalg.norm(left_array) * np.linalg.norm(right_array)
-    if not denominator:
-        return 1.0
-    return float(1 - np.dot(left_array, right_array) / denominator)
+def generate_reference_embedding(content: bytes) -> list[float]:
+    faces = detect_faces(decode_image(content))
+    if not faces:
+        raise ValueError("No face detected in reference image")
+    return represent(faces[0].image)
+
+
+def cosine_distance(left: object, right: object) -> float | None:
+    try:
+        left_values = validate_embedding(left)
+        right_values = validate_embedding(right)
+    except ValueError:
+        return None
+    if len(left_values) != len(right_values):
+        return None
+    left_array = np.asarray(left_values, dtype=float)
+    right_array = np.asarray(right_values, dtype=float)
+    left_norm = np.linalg.norm(left_array)
+    right_norm = np.linalg.norm(right_array)
+    denominator = left_norm * right_norm
+    if not math.isfinite(left_norm) or not math.isfinite(right_norm) or not denominator:
+        return None
+    distance = 1 - np.dot(left_array, right_array) / denominator
+    return float(distance) if math.isfinite(distance) else None

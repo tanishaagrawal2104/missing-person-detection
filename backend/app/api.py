@@ -11,7 +11,7 @@ import jwt
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
 from app.core.security import (
@@ -29,8 +29,10 @@ from app.services.ai import (
     cosine_distance,
     decode_image,
     detect_faces,
+    generate_reference_embedding,
     processing_signature,
     represent,
+    validate_embedding,
 )
 from app.schemas import (
     CaseCreate,
@@ -133,6 +135,18 @@ def coordinate(value: float | None, minimum: float, maximum: float, name: str) -
     return value
 
 
+def valid_references(references: list[ReferenceImage]) -> list[ReferenceImage]:
+    valid: list[ReferenceImage] = []
+    for reference in references:
+        try:
+            validate_embedding(reference.representation)
+        except ValueError:
+            logger.warning("Skipping invalid reference representation %s", reference.id)
+            continue
+        valid.append(reference)
+    return valid
+
+
 def process_image_job(job_id: uuid.UUID, content: bytes, query_storage_key: str) -> None:
     db = SessionLocal()
     try:
@@ -147,21 +161,31 @@ def process_image_job(job_id: uuid.UUID, content: bytes, query_storage_key: str)
             db.commit()
             return
         job.progress = 40
-        references = db.scalars(
+        references = valid_references(db.scalars(
             select(ReferenceImage).join(MissingPersonCase).where(
                 ReferenceImage.case_id == job.case_id,
                 ReferenceImage.representation.is_not(None),
             )
-        ).all()
+        ).all())
+        if not references:
+            raise ValueError("Search could not run because no valid reference embeddings are available.")
         matches_by_reference = {}
+        valid_queries = 0
         for face in faces:
-            query = represent(face.image)
+            try:
+                query = represent(face.image)
+            except ValueError as exc:
+                logger.warning("Skipping face %s with invalid representation: %s", face.index, exc)
+                continue
+            valid_queries += 1
             for reference in references:
                 distance = cosine_distance(query, reference.representation)
-                if distance <= settings.face_match_distance_threshold:
+                if distance is not None and distance <= settings.face_match_distance_threshold:
                     previous = matches_by_reference.get(reference.id)
                     if previous is None or distance < previous[0]:
                         matches_by_reference[reference.id] = (distance, reference)
+        if not valid_queries:
+            raise ValueError("Search could not run because no valid face embeddings were generated.")
         matches = list(matches_by_reference.values())
         for distance, reference in sorted(matches, key=lambda value: value[0]):
             db.add(CandidateMatch(
@@ -196,12 +220,16 @@ def process_video_job(job_id: uuid.UUID, video_path: str) -> None:
         duration = frame_count / fps if fps else 0
         if duration > settings.max_video_duration_seconds:
             raise ValueError("Video exceeds the duration limit")
-        references = db.scalars(
+        references = valid_references(db.scalars(
             select(ReferenceImage).join(MissingPersonCase).where(
                 ReferenceImage.case_id == job.case_id,
                 ReferenceImage.representation.is_not(None),
             )
-        ).all()
+        ).all())
+        if not references:
+            raise ValueError("Search could not run because no valid reference embeddings are available.")
+        valid_queries = 0
+        saw_face = False
         next_sample = 0.0
         while True:
             ok, frame = capture.read()
@@ -214,10 +242,16 @@ def process_video_job(job_id: uuid.UUID, video_path: str) -> None:
             image = decode_image(cv2.imencode(".jpg", frame)[1].tobytes())
             faces = detect_faces(image)
             for face in faces:
-                query = represent(face.image)
+                saw_face = True
+                try:
+                    query = represent(face.image)
+                except ValueError as exc:
+                    logger.warning("Skipping face %s with invalid representation: %s", face.index, exc)
+                    continue
+                valid_queries += 1
                 for reference in references:
                     distance = cosine_distance(query, reference.representation)
-                    if distance <= settings.face_match_distance_threshold:
+                    if distance is not None and distance <= settings.face_match_distance_threshold:
                         db.add(CandidateMatch(
                             search_job_id=job.id, reference_image_id=reference.id,
                             candidate_storage_key=reference.storage_key, distance=distance,
@@ -225,6 +259,8 @@ def process_video_job(job_id: uuid.UUID, video_path: str) -> None:
                             source_storage_key=job.query_storage_key,
                         ))
             db.commit()
+        if saw_face and not valid_queries:
+            raise ValueError("Search could not run because no valid face embeddings were generated.")
         job.status, job.progress = "completed", 100
         db.commit()
     except Exception as exc:
@@ -473,9 +509,7 @@ async def upload_reference_image(case_id: uuid.UUID, image: UploadFile = File(..
     )
     try:
         content = (Path(settings.upload_directory) / key).read_bytes()
-        faces = detect_faces(decode_image(content))
-        if faces:
-            record.representation = represent(faces[0].image)
+        record.representation = generate_reference_embedding(content)
     except Exception as exc:
         logger.warning("Reference representation unavailable for %s: %s", record.id, exc)
         record.representation = None
@@ -484,6 +518,34 @@ async def upload_reference_image(case_id: uuid.UUID, image: UploadFile = File(..
     db.commit()
     db.refresh(record)
     return {"id": str(record.id), "created_at": record.created_at}
+
+
+@router.post("/admin/rebuild-embeddings")
+def rebuild_embeddings(
+    case_id: uuid.UUID | None = None,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    query = select(ReferenceImage)
+    if case_id is not None:
+        query = query.where(ReferenceImage.case_id == case_id)
+    records = db.scalars(query.order_by(ReferenceImage.created_at)).all()
+    regenerated = failed = 0
+    errors: list[str] = []
+    for record in records:
+        try:
+            content = (Path(settings.upload_directory) / record.storage_key).read_bytes()
+            record.representation = generate_reference_embedding(content)
+            record.processing_signature = processing_signature()
+            regenerated += 1
+        except (OSError, ValueError) as exc:
+            record.representation = None
+            failed += 1
+            errors.append(f"{record.id}: {exc}")
+            logger.warning("Reference representation regeneration failed for %s: %s", record.id, exc)
+    audit(db, user, "reference_embeddings.rebuilt", case_id)
+    db.commit()
+    return {"examined": len(records), "regenerated": regenerated, "failed": failed, "errors": errors}
 
 
 @router.get("/images/{image_id}")
@@ -526,9 +588,9 @@ async def submit_sighting(
     case = db.get(MissingPersonCase, case_id)
     if case is None or case.status in {"resolved", "closed"}:
         raise HTTPException(status_code=404, detail="Case is not accepting sightings")
-    key = await store_image(image)
     coordinate(latitude, -90, 90, "latitude")
     coordinate(longitude, -180, 180, "longitude")
+    key = await store_image(image)
     sighting = Sighting(case_id=case_id, source="public_portal", storage_key=key, observed_at=observed_at, location=location, notes=description, latitude=latitude, longitude=longitude)
     db.add(sighting)
     db.commit()
@@ -593,7 +655,12 @@ async def search_video(
 def get_search_job(
     job_id: uuid.UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
 ) -> SearchJob:
-    job = db.get(SearchJob, job_id)
+    job = db.scalar(
+        select(SearchJob).options(
+            selectinload(SearchJob.candidate_matches),
+            selectinload(SearchJob.case),
+        ).where(SearchJob.id == job_id)
+    )
     if job is None or not permitted_case(job.case, user):
         raise HTTPException(status_code=404, detail="Search job not found")
     return job
@@ -603,7 +670,10 @@ def get_search_job(
 def list_search_jobs(
     user: User = Depends(current_user), db: Session = Depends(get_db)
 ) -> list[SearchJob]:
-    query = select(SearchJob).join(MissingPersonCase)
+    query = select(SearchJob).options(
+        selectinload(SearchJob.candidate_matches),
+        selectinload(SearchJob.case),
+    ).join(MissingPersonCase)
     if user.role != "admin":
         query = query.where(MissingPersonCase.created_by_id == user.id)
     return list(db.scalars(query.order_by(SearchJob.created_at.desc())))

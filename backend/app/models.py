@@ -64,7 +64,7 @@ class ReferenceImage(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("missing_person_cases.id"), nullable=False)
     storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
-    representation: Mapped[list[float] | None] = mapped_column(JSONB)
+    representation: Mapped[list[float] | None] = mapped_column(JSONB(none_as_null=True))
     processing_signature: Mapped[str | None] = mapped_column(String(255))
 
     case: Mapped[MissingPersonCase] = relationship(back_populates="reference_images")
@@ -103,6 +103,14 @@ class SearchJob(TimestampMixin, Base):
     candidate_matches: Mapped[list["CandidateMatch"]] = relationship(
         back_populates="search_job", cascade="all, delete-orphan"
     )
+
+    @property
+    def candidates(self) -> list["CandidateMatch"]:
+        return self.candidate_matches
+
+    @property
+    def case_name(self) -> str:
+        return self.case.name
 
 
 class CandidateMatch(TimestampMixin, Base):

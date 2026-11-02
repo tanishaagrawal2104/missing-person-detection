@@ -12,3 +12,4 @@ Pillow>=11,<12
 ultralytics>=8.3,<9
 deepface>=0.0.95,<1
 opencv-python-headless>=4.10,<5
+Werkzeug

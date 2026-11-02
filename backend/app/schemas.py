@@ -105,8 +105,11 @@ class DashboardResponse(BaseModel):
 
 
 class CandidateResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: UUID
     case_id: UUID
+    reference_image_id: UUID | None
     status: str
     distance: float | None
     frame_timestamp_seconds: float | None
@@ -115,8 +118,11 @@ class CandidateResponse(BaseModel):
 
 
 class SearchJobResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: UUID
     case_id: UUID
+    case_name: str
     job_type: str
     status: str
     progress: int
